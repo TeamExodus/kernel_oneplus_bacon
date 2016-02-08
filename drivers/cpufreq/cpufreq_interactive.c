@@ -2,6 +2,8 @@
  * drivers/cpufreq/cpufreq_interactive.c
  *
  * Copyright (C) 2010 Google, Inc.
+ * Copyright (C) 2016 Exodus Android
+ * Copyright (C) 2016 Alex Naidis
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -117,6 +119,9 @@ static int boost_val;
 static int boostpulse_duration_val = DEFAULT_MIN_SAMPLE_TIME;
 /* End time of boost pulse in ktime converted to usecs */
 static u64 boostpulse_endtime;
+
+
+static bool boosted;
 
 /*
  * Max additional time to wait in idle, beyond timer_rate, at speeds above
@@ -367,7 +372,6 @@ static void cpufreq_interactive_timer(unsigned long data)
 	unsigned int loadadjfreq;
 	unsigned int index;
 	unsigned long flags;
-	bool boosted;
 	unsigned long mod_min_sample_time;
 	int i, max_load;
 	unsigned int max_freq;
@@ -377,6 +381,9 @@ static void cpufreq_interactive_timer(unsigned long data)
 		return;
 	if (!pcpu->governor_enabled)
 		goto exit;
+
+	if (cpu_is_offline(data))
+ 		goto exit;
 
 	pcpu->nr_timer_resched = 0;
 	spin_lock_irqsave(&pcpu->load_lock, flags);
@@ -521,16 +528,20 @@ exit:
 
 static void cpufreq_interactive_idle_start(void)
 {
-	struct cpufreq_interactive_cpuinfo *pcpu =
-		&per_cpu(cpuinfo, smp_processor_id());
+	int cpu = smp_processor_id();
+ 	struct cpufreq_interactive_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
 	int pending;
 	u64 now;
 
 	if (!down_read_trylock(&pcpu->enable_sem))
 		return;
-	if (!pcpu->governor_enabled) {
-		up_read(&pcpu->enable_sem);
-		return;
+	if (!pcpu->governor_enabled)
+ 		goto exit;
+
+ 	if (cpu_is_offline(cpu)) {
+ 		del_timer(&pcpu->cpu_timer);
+ 		del_timer(&pcpu->cpu_slack_timer);
+ 		goto exit;
 	}
 
 	pending = timer_pending(&pcpu->cpu_timer);
@@ -556,7 +567,7 @@ static void cpufreq_interactive_idle_start(void)
 
 		}
 	}
-
+exit:
 	up_read(&pcpu->enable_sem);
 }
 
@@ -652,6 +663,8 @@ static void cpufreq_interactive_boost(void)
 	int anyboost = 0;
 	unsigned long flags;
 	struct cpufreq_interactive_cpuinfo *pcpu;
+
+	boosted = true;
 
 	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
 
@@ -1013,7 +1026,8 @@ static ssize_t store_boost(struct kobject *kobj, struct attribute *attr,
 
 	if (boost_val) {
 		trace_cpufreq_interactive_boost("on");
-		cpufreq_interactive_boost();
+		if (!boosted)
+ 			cpufreq_interactive_boost();
 	} else {
 		trace_cpufreq_interactive_unboost("off");
 	}
@@ -1035,7 +1049,8 @@ static ssize_t store_boostpulse(struct kobject *kobj, struct attribute *attr,
 
 	boostpulse_endtime = ktime_to_us(ktime_get()) + boostpulse_duration_val;
 	trace_cpufreq_interactive_boost("pulse");
-	cpufreq_interactive_boost();
+	if (!boosted)
+ 		cpufreq_interactive_boost();
 	return count;
 }
 
